@@ -40,9 +40,9 @@ But in real-world development:
 
 This leads to one of three bad outcomes:
 
-1.  **Lying about the scope**: Using a single scope that doesn't fully describe the change
-2.  **Splitting commits artificially**: Breaking a logical change into multiple commits just to use different scopes
-3.  **Using vague scopes**: Resorting to `misc`, `common`, or `general` because nothing fits
+1. **Lying about the scope**: Using a single scope that doesn't fully describe the change
+2. **Splitting commits artificially**: Breaking a logical change into multiple commits just to use different scopes
+3. **Using vague scopes**: Resorting to `misc`, `common`, or `general` because nothing fits
 
 This makes commit history less useful for:
 - Generating accurate changelogs
@@ -65,10 +65,11 @@ This makes commit history less useful for:
 
 ### Key Principles
 
-1.  **Maximum 3 scopes**: Keep it focused. If you need more than 3, your commit is too large.
-2.  **Primary scope first**: The first scope listed is the one most affected by the change.
-3.  **Order matters**: Scopes should be ordered from most affected to least affected.
-4.  **Delimiter choice is meaningful**: `&` means the same file, `,` means different files.
+1. **Maximum 3 scopes**: Keep it focused. If you need more than 3, your commit is too large.
+2. **Primary scope first**: The first scope listed is the one most affected by the change.
+3. **Order matters**: Scopes should be ordered from most affected to least affected.
+4. **Delimiter choice is meaningful**: `&` means the same file, `,` means different files.
+5. **Never mix delimiters**: A commit must use either `&` or `,`, never both.
 
 ---
 
@@ -96,9 +97,9 @@ Add `!` before the parentheses to indicate a breaking change:
 
 | Part | Description | Rules |
 |------|-------------|-------|
-| **type** | Category of change | `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore` |
+| **type** | Category of change | `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`, `ci`, `build`, `revert` |
 | **!** | Breaking change indicator | Optional, only included for breaking changes |
-| **scopes** | Modules affected | 1-3 scopes, lowercase, no spaces |
+| **scopes** | Modules affected | 1-3 scopes, lowercase alphanumeric, no spaces |
 | **delimiter** | Separator between scopes | `&` for same file, `,` for different files |
 | **subject** | Brief description | Present tense, imperative mood, no period |
 
@@ -185,30 +186,57 @@ chore(monitoring): update logger   # All for the same change!
 
 SCOPE-X extends Semantic Versioning rules based on the **primary scope** (the first scope listed).
 
-| Condition | Version Bump | Explanation |
-|-----------|--------------|-------------|
-| Contains `!` (breaking change) | **MAJOR** | Any breaking change requires a major version bump |
-| `feat` in **Scope 1** (primary) | **MINOR** | The main feature is in the primary scope |
-| `feat` in **Scope 2 or 3** | **PATCH** | Feature is secondary; primary scope determines impact |
-| `fix`, `docs`, `chore` | **PATCH** | These are always patch-level changes |
-| `perf` in Scope 1 | **MINOR** | Performance improvement can be a feature |
-| `refactor` in Scope 1 | **PATCH** | No behavior change, just internal improvement |
+### Decision Matrix
 
-### Why This Matters
+| Primary Type | Secondary Types | Version Bump | Example |
+|--------------|-----------------|--------------|---------|
+| Any type with `!` | Any | **MAJOR** | `feat!(api, db): breaking change` |
+| `feat` in Scope 1 | Any | **MINOR** | `feat(api & ui): add feature` |
+| `feat` in Scope 2 or 3 | `fix` in Scope 1 | **PATCH** | `fix(api, feat): patch with feature` |
+| `feat` in Scope 2 or 3 | `docs` in Scope 1 | **PATCH** | `docs(readme, feat): doc with feature` |
+| `perf` in Scope 1 | Any | **MINOR** | `perf(api): improve performance` |
+| `fix` in Scope 1 | Any except `feat` | **PATCH** | `fix(auth): fix bug` |
+| `docs`, `style`, `refactor` | Any | **PATCH** | `refactor(core): internal change` |
+| `chore`, `ci`, `build` | Any | **PATCH** | `chore(deps): update dependencies` |
 
-- **More accurate versioning**: The primary scope determines the actual impact
-- **Better changelog generation**: Features in secondary scopes are listed as minor improvements
-- **Clear communication**: Team members understand which module is most affected
+### Algorithm
+
+```javascript
+function determineVersionBump(commit) {
+  // 1. Breaking change always wins
+  if (commit.breaking) return 'major';
+  
+  // 2. Check primary scope
+  const primaryType = commit.type;
+  
+  // 3. Features in primary scope = MINOR
+  if (primaryType === 'feat') return 'minor';
+  
+  // 4. Performance improvements = MINOR
+  if (primaryType === 'perf') return 'minor';
+  
+  // 5. Everything else = PATCH
+  return 'patch';
+}
+```
 
 ### Example Scenarios
 
 ```
 feat(api & ui): add export feature        # MINOR (API is primary)
 fix(api & feat): improve performance      # PATCH (fix is primary)
-feat(core, helper): new util function     # PATCH (helper is secondary)
+feat(core, helper): new util function     # MINOR (core is primary, feat wins)
 feat!(api, database): change schema       # MAJOR (breaking change)
 feat(core & ui & api): add dark mode      # MINOR (core is primary)
+perf(database & api): optimize queries    # MINOR (performance improvement)
+docs(readme, feat): update docs           # PATCH (docs is primary)
 ```
+
+### Why This Matters
+
+- **More accurate versioning**: The primary scope determines the actual impact
+- **Better changelog generation**: Features in secondary scopes are listed as minor improvements
+- **Clear communication**: Team members understand which module is most affected
 
 ---
 
@@ -221,28 +249,65 @@ Save this as `.git/hooks/commit-msg`:
 ```bash
 #!/bin/bash
 # SCOPE-X Commit Message Validator
+# Install: chmod +x .git/hooks/commit-msg
 
-MSG=$(cat $1)
+COMMIT_MSG=$(cat "$1")
 
-# Check if commit follows SCOPE-X format
-# Format: type(!)(scope1 & scope2): subject OR type(!)(scope1, scope2): subject
-# Max 3 scopes allowed
-if [[ ! $MSG =~ ^[a-z]+(!?)\\(([a-z0-9]+([\&,][a-z0-9]+){0,2})\\):\ .+$ ]]; then
-    echo "ERROR: Invalid commit message format."
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Skip merge and revert commits
+if [[ "$COMMIT_MSG" =~ ^(Merge|Revert) ]]; then
+    exit 0
+fi
+
+# Check format: type(!)(scope1 [&|,] scope2 [&|,] scope3): subject
+# Valid types: feat, fix, docs, style, refactor, perf, test, chore, ci, build, revert
+if [[ ! "$COMMIT_MSG" =~ ^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)!?\(([a-z0-9]+([&,][a-z0-9]+){0,2})\):\ .+$ ]]; then
+    echo -e "${RED}ERROR: Invalid SCOPE-X commit message format${NC}"
     echo ""
-    echo "Expected format:"
+    echo "Expected formats:"
     echo "  Single file, multiple modules: <type>(<scope1> & <scope2>): <subject>"
     echo "  Multiple files, different modules: <type>(<scope1>, <scope2>): <subject>"
     echo "  Breaking changes: <type>!(<scope1> & <scope2>): <subject>"
-    echo "  Maximum 3 scopes allowed"
     echo ""
-    echo "Example:"
-    echo "  feat(auth & monitoring): add structured logging"
-    echo "  fix(auth, api): handle expired token"
-    echo "  feat!(core, ui): migrate to new state management"
+    echo "Rules:"
+    echo "  • Maximum 3 scopes"
+    echo "  • Cannot mix '&' and ',' delimiters"
+    echo "  • Scopes must be lowercase letters and numbers"
+    echo "  • Valid types: feat, fix, docs, style, refactor, perf, test, chore, ci, build, revert"
+    echo ""
+    echo "Examples:"
+    echo "  ${GREEN}feat(auth & monitoring): add structured logging${NC}"
+    echo "  ${GREEN}fix(auth, api): handle expired token${NC}"
+    echo "  ${GREEN}feat!(core, ui): migrate to new state management${NC}"
     exit 1
 fi
 
+# Additional validation: check for mixed delimiters
+SCOPES=$(echo "$COMMIT_MSG" | sed -n 's/^[^(]*(\([^)]*\)).*$/\1/p')
+if [[ "$SCOPES" == *"&"* ]] && [[ "$SCOPES" == *","* ]]; then
+    echo -e "${RED}ERROR: Cannot mix '&' and ',' delimiters${NC}"
+    echo "Use either '&' (same file) or ',' (different files), not both"
+    exit 1
+fi
+
+# Count scopes
+if [[ "$SCOPES" == *"&"* ]]; then
+    COUNT=$(echo "$SCOPES" | tr '&' '\n' | wc -l | tr -d ' ')
+else
+    COUNT=$(echo "$SCOPES" | tr ',' '\n' | wc -l | tr -d ' ')
+fi
+
+if [ "$COUNT" -gt 3 ]; then
+    echo -e "${RED}ERROR: Too many scopes ($COUNT). Maximum is 3.${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✅ SCOPE-X commit format valid!${NC}"
 exit 0
 ```
 
@@ -267,23 +332,46 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Validate commit messages
         run: |
           # Get all commits in this PR/push
-          COMMITS=$(git log --format=%s origin/main..HEAD 2>/dev/null || git log --format=%s HEAD~10..HEAD)
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            COMMITS=$(git log --format=%s origin/${{ github.base_ref }}..HEAD 2>/dev/null || echo "")
+          else
+            COMMITS=$(git log --format=%s HEAD~10..HEAD 2>/dev/null || echo "")
+          fi
           
-          for commit in $COMMITS; do
-            if [[ ! $commit =~ ^[a-z]+(!?)\\(([a-z0-9]+([\&,][a-z0-9]+){0,2})\\):\ .+ ]]; then
-              echo "Invalid commit: $commit"
-              exit 1
+          if [ -z "$COMMITS" ]; then
+            echo "No commits to validate"
+            exit 0
+          fi
+          
+          VALID=0
+          echo "$COMMITS" | while IFS= read -r commit; do
+            [ -z "$commit" ] && continue
+            
+            # Skip merge commits
+            [[ "$commit" =~ ^Merge ]] && continue
+            [[ "$commit" =~ ^Revert ]] && continue
+            
+            # Validate format
+            if [[ ! "$commit" =~ ^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)!?\(([a-z0-9]+([&,][a-z0-9]+){0,2})\):\ .+$ ]]; then
+              echo "❌ Invalid commit: $commit"
+              VALID=1
+            else
+              echo "✅ Valid commit: $commit"
             fi
           done
           
-          echo "All commits valid!"
+          if [ "$VALID" -eq 1 ]; then
+            exit 1
+          fi
+          
+          echo "✅ All commits valid!"
 ```
 
 ### 3. Pre-commit Hook (Optional)
@@ -338,11 +426,23 @@ const parseScopeX = (msg) => {
   if (!match) return null;
   
   const [, type, breaking, scopesStr, subject] = match;
-  const isSingleFile = scopesStr.includes('&');
-  const scopes = scopesStr.split(isSingleFile ? / & / : /, /).map(s => s.trim());
   
-  // Enforce max 3 scopes
-  if (scopes.length > 3) return null;
+  // Determine delimiter and parse scopes
+  const hasAmpersand = scopesStr.includes('&');
+  const hasComma = scopesStr.includes(',');
+  
+  // Validate delimiter mixing
+  if (hasAmpersand && hasComma) return null;
+  
+  const isSingleFile = hasAmpersand;
+  const delimiter = hasAmpersand ? / & / : /, /;
+  const scopes = scopesStr.split(delimiter).map(s => s.trim());
+  
+  // Validate max 3 scopes
+  if (scopes.length === 0 || scopes.length > 3) return null;
+  
+  // Validate scope characters
+  if (!scopes.every(s => /^[a-z0-9]+$/.test(s))) return null;
   
   return {
     type,
@@ -400,7 +500,15 @@ def parse_scope_x(msg):
         return None
     
     type_, breaking, scopes_str, subject = match.groups()
-    is_single_file = '&' in scopes_str
+    
+    # Check for mixed delimiters
+    has_ampersand = '&' in scopes_str
+    has_comma = ',' in scopes_str
+    
+    if has_ampersand and has_comma:
+        return None
+    
+    is_single_file = has_ampersand
     
     # Split by & or , depending on delimiter
     if is_single_file:
@@ -409,8 +517,13 @@ def parse_scope_x(msg):
         scopes = [s.strip() for s in scopes_str.split(',')]
     
     # Enforce max 3 scopes
-    if len(scopes) > 3:
+    if len(scopes) == 0 or len(scopes) > 3:
         return None
+    
+    # Validate scope characters
+    for scope in scopes:
+        if not re.match(r'^[a-z0-9]+$', scope):
+            return None
     
     return {
         'type': type_,
@@ -445,12 +558,12 @@ import (
 )
 
 type Commit struct {
-    Type          string
-    Breaking      bool
-    Scopes        []string
-    IsSingleFile  bool
-    Subject       string
-    PrimaryScope  string
+    Type            string
+    Breaking        bool
+    Scopes          []string
+    IsSingleFile    bool
+    Subject         string
+    PrimaryScope    string
     SecondaryScopes []string
 }
 
@@ -468,7 +581,15 @@ func ParseScopeX(msg string) *Commit {
     scopesStr := matches[3]
     subject := matches[4]
     
-    isSingleFile := strings.Contains(scopesStr, "&")
+    // Check for mixed delimiters
+    hasAmpersand := strings.Contains(scopesStr, "&")
+    hasComma := strings.Contains(scopesStr, ",")
+    
+    if hasAmpersand && hasComma {
+        return nil
+    }
+    
+    isSingleFile := hasAmpersand
     var scopes []string
     
     if isSingleFile {
@@ -483,8 +604,16 @@ func ParseScopeX(msg string) *Commit {
     }
     
     // Enforce max 3 scopes
-    if len(scopes) > 3 {
+    if len(scopes) == 0 || len(scopes) > 3 {
         return nil
+    }
+    
+    // Validate scope characters
+    scopeRe := regexp.MustCompile(`^[a-z0-9]+$`)
+    for _, scope := range scopes {
+        if !scopeRe.MatchString(scope) {
+            return nil
+        }
     }
     
     secondary := []string{}
@@ -493,12 +622,12 @@ func ParseScopeX(msg string) *Commit {
     }
     
     return &Commit{
-        Type:          type_,
-        Breaking:      breaking,
-        Scopes:        scopes,
-        IsSingleFile:  isSingleFile,
-        Subject:       subject,
-        PrimaryScope:  scopes[0],
+        Type:            type_,
+        Breaking:        breaking,
+        Scopes:          scopes,
+        IsSingleFile:    isSingleFile,
+        Subject:         subject,
+        PrimaryScope:    scopes[0],
         SecondaryScopes: secondary,
     }
 }
@@ -517,7 +646,7 @@ func main() {
 }
 ```
 
-### Rust Parser (Bonus)
+### Rust Parser
 
 ```rust
 use regex::Regex;
@@ -543,15 +672,30 @@ fn parse_scope_x(msg: &str) -> Option<Commit> {
     let scopes_str = caps[3].to_string();
     let subject = caps[4].to_string();
     
-    let is_single_file = scopes_str.contains('&');
+    let has_ampersand = scopes_str.contains('&');
+    let has_comma = scopes_str.contains(',');
+    
+    if has_ampersand && has_comma {
+        return None;
+    }
+    
+    let is_single_file = has_ampersand;
     let scopes: Vec<String> = if is_single_file {
         scopes_str.split(" & ").map(|s| s.trim().to_string()).collect()
     } else {
         scopes_str.split(',').map(|s| s.trim().to_string()).collect()
     };
     
-    if scopes.len() > 3 {
+    if scopes.is_empty() || scopes.len() > 3 {
         return None;
+    }
+    
+    // Validate scope characters
+    let scope_re = Regex::new(r"^[a-z0-9]+$").unwrap();
+    for scope in &scopes {
+        if !scope_re.is_match(scope) {
+            return None;
+        }
     }
     
     let secondary_scopes = if scopes.len() > 1 {
@@ -636,6 +780,15 @@ If you're currently using Conventional Commits, migrating is straightforward:
 #!/bin/bash
 # migrate-to-scope-x.sh
 # Converts Conventional Commits to SCOPE-X format
+# Usage: ./migrate-to-scope-x.sh [--dry-run]
+
+DRY_RUN=false
+if [[ "$1" == "--dry-run" ]]; then
+    DRY_RUN=true
+fi
+
+# Backup existing commits
+git branch backup-before-migration
 
 git log --format=%H %s | while read commit; do
   msg=$(git log -1 --format=%s $commit)
@@ -653,9 +806,18 @@ git log --format=%H %s | while read commit; do
     echo "Converting: $msg"
     echo "To:         $new_msg"
     
-    git commit --amend -m "$new_msg" -C $commit
+    if [[ "$DRY_RUN" == false ]]; then
+      git commit --amend -m "$new_msg" -C $commit
+    fi
   fi
 done
+
+if [[ "$DRY_RUN" == false ]]; then
+    echo "✅ Migration complete! Changes have been amended."
+else
+    echo "✅ Dry run complete. No changes were made."
+    echo "Run without --dry-run to apply changes."
+fi
 ```
 
 ### Migration Checklist
@@ -708,38 +870,48 @@ SCOPE-X is designed as an extension to Conventional Commits. It works with most 
 
 You can use the provided parsers to extract the primary scope and treat it as a standard Conventional Commit.
 
+### What's the difference between `&` and `,`?
+
+- **`&` (ampersand)**: Changes are in a single file that affects multiple modules
+- **`,` (comma)**: Changes are in multiple files across different modules
+
+### Do I need to use spaces around delimiters?
+
+Spaces around delimiters are optional but recommended for readability:
+- `feat(auth&monitoring): ...` (valid)
+- `feat(auth & monitoring): ...` (recommended)
+- `feat(auth, api): ...` (recommended)
+
 ---
 
 ## Contributing
 
-This is **your idea** and we're building the ecosystem around it!
+This is **our idea** and we're building the ecosystem around it!
 
 ### Ways to contribute
 
-1.  Report bugs in the hook scripts
-2.  Translate documentation to your language
-3.  Add parsers in other languages (Rust, Kotlin, Ruby, etc.)
-4.  Write blog posts about your experience
-5.  Improve this documentation
-6.  Create tooling (IDE plugins, CI actions, etc.)
+1. Report bugs in the hook scripts
+2. Translate documentation to your language
+3. Add parsers in other languages (Rust, Kotlin, Ruby, etc.)
+4. Write blog posts about your experience
+5. Improve this documentation
+6. Create tooling (IDE plugins, CI actions, etc.)
 
 ### Development Setup
 
 ```bash
-git clone https://github.com/yourusername/scope-x-convention
-cd scope-x-convention
-npm install  # or pip install -r requirements.txt
-npm test     # or pytest
+git clone https://github.com/lilypadteam/SCOPE-X
+cd SCOPE-X
 ```
 
 ### Pull Request Process
 
-1.  Fork the repository
-2.  Create a feature branch
-3.  Make your changes
-4.  Run tests
-5.  Submit a pull request
-6.  Wait for review
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests
+5. Submit a pull request
+6. Wait for review
 
 ### Code of Conduct
 
@@ -747,20 +919,8 @@ We are committed to fostering a welcoming community. Please read our [Code of Co
 
 ---
 
-## Real-World Adoption
 
-### Companies Using SCOPE-X
 
-*Add your company here!*
-
-- [Your Company] - [What you use it for]
-- [Company 2] - [Use case]
-
-### Open Source Projects
-
-*Add your project here!*
-
-- [Project Name](link) - [How you use SCOPE-X]
 
 ### Testimonials
 
@@ -779,12 +939,9 @@ We are committed to fostering a welcoming community. Please read our [Code of Co
 
 ---
 
-
----
-
 ## Acknowledgments
 
-- Based on the original idea by **[Your Name/GitHub]**
+- Based on the original idea by **LilyPadTeam**
 - Inspired by [Conventional Commits](https://www.conventionalcommits.org/)
 - Built with ❤️ for developers who hate lying to their commit history
 
