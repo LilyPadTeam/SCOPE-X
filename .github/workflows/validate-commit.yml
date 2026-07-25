@@ -22,22 +22,17 @@ jobs:
         run: |
           # For pull requests, get commits in the PR
           if [ "${{ github.event_name }}" == "pull_request" ]; then
-            # Get the base ref (target branch) and compare
             git fetch origin ${{ github.base_ref }}
             COMMITS=$(git log --format=%s origin/${{ github.base_ref }}..HEAD 2>/dev/null || echo "")
           else
-            # For pushes, get commits since last push or all commits if shallow
-            # Use a safer approach: get all commits in this push
+            # For pushes, get commits since last push
             if [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
-              # Get commits since the previous commit
               COMMITS=$(git log --format=%s ${{ github.event.before }}..HEAD 2>/dev/null || echo "")
             else
-              # Fallback: get last 10 commits, but handle if less exist
               COMMITS=$(git log --format=%s -n 10 HEAD 2>/dev/null || echo "")
             fi
           fi
           
-          # If no commits found, exit gracefully
           if [ -z "$COMMITS" ]; then
             echo "No commits to validate"
             echo "commits=No commits to validate" >> $GITHUB_OUTPUT
@@ -54,18 +49,19 @@ jobs:
           VALID=true
           COMMIT_LIST="${{ steps.commits.outputs.commits }}"
           
-          # Handle case where commits might have newlines
           echo "$COMMIT_LIST" | while IFS= read -r commit; do
-            # Skip empty lines
             if [ -z "$commit" ]; then
               continue
             fi
             
             echo "Checking: $commit"
             
-            # Check if commit matches SCOPE-X format
-            # Format: type(!)(scope1 & scope2): subject OR type(!)(scope1, scope2): subject
-            if [[ ! $commit =~ ^[a-z]+(!?)\\(([a-z0-9]+([\&,][a-z0-9]+){0,2})\\):\ .+$ ]]; then
+            # Fixed regex pattern that properly handles:
+            # - Optional spaces around delimiters
+            # - All valid types (feat, fix, chore, docs, etc.)
+            # - Breaking changes with !
+            # - Max 3 scopes with & or , delimiters
+            if [[ ! $commit =~ ^[a-z]+(!?)\\([a-z0-9]+([[:space:]]*[&,][[:space:]]*[a-z0-9]+){0,2})\\):[[:space:]]+.+$ ]]; then
               echo "ERROR: Invalid commit message: $commit"
               echo ""
               echo "Expected format:"
@@ -78,13 +74,13 @@ jobs:
               echo "  feat(auth & monitoring): add structured logging"
               echo "  fix(auth, api): handle expired token"
               echo "  feat!(core, ui): migrate to new state management"
+              echo "  chore(fix & ci): fix errors"
               exit 1
             fi
             
             echo "✅ Valid commit: $commit"
           done
           
-          # Check if validation passed
           if [ "$?" -eq 0 ]; then
             echo "✅ All commit messages are valid SCOPE-X format!"
           else
