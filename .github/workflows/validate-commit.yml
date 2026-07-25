@@ -39,93 +39,137 @@ jobs:
             exit 0
           fi
           
-          echo "commits<<EOF" >> $GITHUB_OUTPUT
-          echo "$COMMITS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Store commits in a file to handle multiline properly
+          echo "$COMMITS" > commits.txt
+          echo "commits_file=commits.txt" >> $GITHUB_OUTPUT
           
       - name: Validate SCOPE-X format
-        if: steps.commits.outputs.commits != 'No commits to validate'
+        if: steps.commits.outputs.commits_file != ''
         run: |
-          VALID=true
-          COMMIT_LIST="${{ steps.commits.outputs.commits }}"
+          COMMITS_FILE="${{ steps.commits.outputs.commits_file }}"
+          VALID=0
+          LINE_NUM=0
           
-          echo "$COMMIT_LIST" | while IFS= read -r commit; do
+          while IFS= read -r commit; do
+            LINE_NUM=$((LINE_NUM + 1))
+            
+            # Skip empty lines
             if [ -z "$commit" ]; then
               continue
             fi
             
             echo "Checking: $commit"
             
-            # Validate with a simpler approach using multiple conditions
-            # Extract type, scope, and subject
-            if [[ "$commit" =~ ^([a-z]+)(!?)\(([^)]+)\):(.+)$ ]]; then
-              TYPE="${BASH_REMATCH[1]}"
-              BREAKING="${BASH_REMATCH[2]}"
-              SCOPES="${BASH_REMATCH[3]}"
-              SUBJECT="${BASH_REMATCH[4]}"
-              
-              # Clean up scopes (remove spaces)
-              SCOPES_CLEAN=$(echo "$SCOPES" | tr -d ' ')
-              
-              # Check if scopes are empty
-              if [ -z "$SCOPES_CLEAN" ]; then
-                echo "ERROR: Empty scope"
-                exit 1
-              fi
-              
-              # Check subject
-              if [ -z "$SUBJECT" ] || [[ "$SUBJECT" =~ ^[[:space:]]+$ ]]; then
-                echo "ERROR: Empty subject"
-                exit 1
-              fi
-              
-              # Count scopes
-              if [[ "$SCOPES_CLEAN" == *"&"* ]]; then
-                DELIMITER="&"
-                COUNT=$(echo "$SCOPES_CLEAN" | awk -F'&' '{print NF}')
-              elif [[ "$SCOPES_CLEAN" == *","* ]]; then
-                DELIMITER=","
-                COUNT=$(echo "$SCOPES_CLEAN" | awk -F',' '{print NF}')
-              else
-                DELIMITER="none"
-                COUNT=1
-              fi
-              
-              # Validate max 3 scopes
-              if [ "$COUNT" -gt 3 ]; then
-                echo "ERROR: Too many scopes ($COUNT). Maximum is 3."
-                echo "Commit: $commit"
-                exit 1
-              fi
-              
-              echo "✅ Valid commit: $commit"
-              echo "   Type: $TYPE"
-              echo "   Breaking: ${BREAKING:-No}"
-              echo "   Scopes: $SCOPES ($COUNT scope(s))"
-              echo "   Subject: $SUBJECT"
-              echo "---"
-              
-            else
-              echo "ERROR: Invalid commit message format: $commit"
-              echo ""
-              echo "Expected format:"
-              echo "  <type>(<scope1> & <scope2>): <subject>  (same file)"
-              echo "  <type>(<scope1>, <scope2>): <subject>  (different files)"
-              echo "  <type>!(<scope>): <subject>  (breaking change)"
-              echo ""
-              echo "Examples:"
-              echo "  feat(auth & monitoring): add structured logging"
-              echo "  fix(auth, api): handle expired token gracefully"
-              echo "  feat!(core, ui): migrate to new state management"
-              echo "  chore(fix & ci): fix errors"
-              echo ""
-              echo "Your commit: $commit"
-              exit 1
+            # Check if commit has the required format (contains '(' and ')')
+            if [[ ! "$commit" =~ .*\(.*\).* ]]; then
+              echo "❌ ERROR: Missing format 'type(scope): subject'"
+              echo "   Commit: $commit"
+              VALID=1
+              continue
             fi
-          done
+            
+            # Extract parts
+            TYPE=$(echo "$commit" | cut -d'(' -f1)
+            REST=$(echo "$commit" | cut -d'(' -f2-)
+            
+            # Check for breaking change indicator BEFORE modifying TYPE
+            BREAKING="No"
+            if [[ "$TYPE" == *"!"* ]]; then
+              BREAKING="Yes"
+              TYPE=$(echo "$TYPE" | sed 's/!$//')
+            fi
+            
+            # Extract scope and subject
+            SCOPES=$(echo "$REST" | cut -d')' -f1)
+            SUBJECT=$(echo "$REST" | cut -d')' -f2- | sed 's/^://' | sed 's/^[[:space:]]*//')
+            
+            # Validate parts exist
+            if [ -z "$TYPE" ]; then
+              echo "❌ ERROR: Missing type"
+              echo "   Commit: $commit"
+              VALID=1
+              continue
+            fi
+            
+            if [ -z "$SCOPES" ]; then
+              echo "❌ ERROR: Missing scope(s)"
+              echo "   Commit: $commit"
+              VALID=1
+              continue
+            fi
+            
+            if [ -z "$SUBJECT" ]; then
+              echo "❌ ERROR: Missing subject"
+              echo "   Commit: $commit"
+              VALID=1
+              continue
+            fi
+            
+            # Clean up scopes (remove spaces)
+            SCOPES_CLEAN=$(echo "$SCOPES" | tr -d ' ')
+            
+            # Count scopes - handle both & and , but not mixed
+            if [[ "$SCOPES_CLEAN" == *"&"* ]] && [[ "$SCOPES_CLEAN" == *","* ]]; then
+              echo "❌ ERROR: Cannot mix '&' and ',' delimiters in scopes"
+              echo "   Scopes: $SCOPES"
+              VALID=1
+              continue
+            fi
+            
+            if [[ "$SCOPES_CLEAN" == *"&"* ]]; then
+              COUNT=$(echo "$SCOPES_CLEAN" | tr '&' '\n' | wc -l | tr -d ' ')
+            elif [[ "$SCOPES_CLEAN" == *","* ]]; then
+              COUNT=$(echo "$SCOPES_CLEAN" | tr ',' '\n' | wc -l | tr -d ' ')
+            else
+              COUNT=1
+            fi
+            
+            # Validate max 3 scopes
+            if [ "$COUNT" -gt 3 ]; then
+              echo "❌ ERROR: Too many scopes ($COUNT). Maximum is 3."
+              echo "   Commit: $commit"
+              VALID=1
+              continue
+            fi
+            
+            # Validate type is alphanumeric (lowercase only)
+            if [[ ! "$TYPE" =~ ^[a-z]+$ ]]; then
+              echo "❌ ERROR: Type must be lowercase letters only: $TYPE"
+              echo "   Commit: $commit"
+              VALID=1
+              continue
+            fi
+            
+            # Validate scope characters (only lowercase, numbers, &, ,)
+            if [[ ! "$SCOPES_CLEAN" =~ ^[a-z0-9]+([&,][a-z0-9]+)*$ ]]; then
+              echo "❌ ERROR: Scopes must contain only lowercase letters, numbers, &, and ,"
+              echo "   Scopes: $SCOPES"
+              echo "   Commit: $commit"
+              VALID=1
+              continue
+            fi
+            
+            # Validate subject (should not be empty and should have at least one word)
+            if [[ "$SUBJECT" =~ ^[[:space:]]*$ ]]; then
+              echo "❌ ERROR: Subject cannot be empty"
+              echo "   Commit: $commit"
+              VALID=1
+              continue
+            fi
+            
+            # All validations passed
+            echo "✅ Valid commit: $commit"
+            echo "   Type: $TYPE"
+            echo "   Breaking: $BREAKING"
+            echo "   Scopes: $SCOPES ($COUNT scope(s))"
+            echo "   Subject: $SUBJECT"
+            echo "---"
+            
+          done < "$COMMITS_FILE"
           
-          if [ "$?" -eq 0 ]; then
+          if [ "$VALID" -eq 0 ]; then
             echo "✅ All commit messages are valid SCOPE-X format!"
           else
+            echo "❌ One or more commits failed validation"
             exit 1
           fi
