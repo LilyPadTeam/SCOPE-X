@@ -1,0 +1,276 @@
+#!/bin/bash
+# SCOPE-X Commit Message Validator (Git Hook)
+# This hook validates that commit messages follow the SCOPE-X convention
+# Install by copying to .git/hooks/commit-msg and making executable
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Get the commit message from the argument
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
+
+# Function to print error messages
+print_error() {
+    echo ""
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║                    ❌ COMMIT REJECTED ❌                    ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+# Function to print success messages
+print_success() {
+    echo ""
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║                    ✅ COMMIT ACCEPTED ✅                    ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+# Function to print format help
+print_format_help() {
+    echo -e "${YELLOW}Expected format:${NC}"
+    echo ""
+    echo -e "  ${BLUE}<type>(<scope1> & <scope2>): <subject>${NC}   (same file, multiple modules)"
+    echo -e "  ${BLUE}<type>(<scope1>, <scope2>): <subject>${NC}   (multiple files, different modules)"
+    echo -e "  ${BLUE}<type>!(<scope>): <subject>${NC}            (breaking change)"
+    echo ""
+    echo -e "${YELLOW}Examples:${NC}"
+    echo ""
+    echo -e "  ${GREEN}feat(auth & monitoring): add structured logging${NC}"
+    echo -e "  ${GREEN}fix(auth, api): handle expired token gracefully${NC}"
+    echo -e "  ${GREEN}feat!(core, payment, notification): implement new event bus${NC}"
+    echo -e "  ${GREEN}chore(fix & ci): fix errors${NC}"
+    echo -e "  ${GREEN}docs(readme, contributing): update onboarding guides${NC}"
+    echo ""
+    echo -e "${YELLOW}Rules:${NC}"
+    echo -e "  • Maximum 3 scopes allowed"
+    echo -e "  • Cannot mix '&' and ',' delimiters"
+    echo -e "  • Type must be lowercase letters only: feat, fix, docs, style, refactor, perf, test, chore, ci, build, revert"
+    echo -e "  • Type can end with '!' for breaking changes (e.g., feat!)"
+    echo -e "  • Scopes must be lowercase letters and numbers only"
+    echo -e "  • Subject cannot be empty"
+    echo ""
+}
+
+# Check if commit message is empty
+if [ -z "$COMMIT_MSG" ]; then
+    print_error
+    echo -e "${RED}Error: Empty commit message${NC}"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Remove comments from commit message (lines starting with #)
+COMMIT_MSG_CLEAN=$(echo "$COMMIT_MSG" | grep -v '^#' | grep -v '^$' | head -1)
+
+# Check for merge commits (skip validation for merge commits)
+if [[ "$COMMIT_MSG" =~ ^Merge.* ]]; then
+    echo -e "${YELLOW}⚠️  Skipping validation for merge commit${NC}"
+    exit 0
+fi
+
+# Check for revert commits (skip validation for revert commits)
+if [[ "$COMMIT_MSG" =~ ^Revert.* ]]; then
+    echo -e "${YELLOW}⚠️  Skipping validation for revert commit${NC}"
+    exit 0
+fi
+
+# Check if commit has the required format (contains '(' and ')')
+if [[ ! "$COMMIT_MSG" =~ .*\(.*\).* ]]; then
+    print_error
+    echo -e "${RED}Error: Missing format 'type(scope): subject'${NC}"
+    echo ""
+    echo -e "${YELLOW}Your commit:${NC} $COMMIT_MSG"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Extract parts - handle the case where type might have '!'
+TYPE=$(echo "$COMMIT_MSG" | cut -d'(' -f1)
+REST=$(echo "$COMMIT_MSG" | cut -d'(' -f2-)
+
+# Check for breaking change indicator BEFORE modifying TYPE
+BREAKING="No"
+# Check if TYPE ends with '!' or if the format has '!' before '('
+if [[ "$TYPE" == *"!"* ]] || [[ "$COMMIT_MSG" =~ ^[a-z]+!\( ]]; then
+    BREAKING="Yes"
+    # Remove '!' from type for validation
+    TYPE=$(echo "$TYPE" | sed 's/!$//')
+fi
+
+# Extract scope and subject
+SCOPES=$(echo "$REST" | cut -d')' -f1)
+SUBJECT=$(echo "$REST" | cut -d')' -f2- | sed 's/^://' | sed 's/^[[:space:]]*//')
+
+# Validate parts exist
+if [ -z "$TYPE" ]; then
+    print_error
+    echo -e "${RED}Error: Missing type${NC}"
+    echo ""
+    echo -e "${YELLOW}Your commit:${NC} $COMMIT_MSG"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+if [ -z "$SCOPES" ]; then
+    print_error
+    echo -e "${RED}Error: Missing scope(s)${NC}"
+    echo ""
+    echo -e "${YELLOW}Your commit:${NC} $COMMIT_MSG"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+if [ -z "$SUBJECT" ]; then
+    print_error
+    echo -e "${RED}Error: Missing subject${NC}"
+    echo ""
+    echo -e "${YELLOW}Your commit:${NC} $COMMIT_MSG"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Clean up scopes (remove spaces)
+SCOPES_CLEAN=$(echo "$SCOPES" | tr -d ' ')
+
+# Check for mixed delimiters
+if [[ "$SCOPES_CLEAN" == *"&"* ]] && [[ "$SCOPES_CLEAN" == *","* ]]; then
+    print_error
+    echo -e "${RED}Error: Cannot mix '&' and ',' delimiters in scopes${NC}"
+    echo ""
+    echo -e "${YELLOW}Your scopes:${NC} $SCOPES"
+    echo -e "${YELLOW}Use either '&' (same file) or ',' (different files), not both${NC}"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Count scopes - handle spaces properly
+if [[ "$SCOPES_CLEAN" == *"&"* ]]; then
+    # Split by & and count
+    COUNT=$(echo "$SCOPES_CLEAN" | tr '&' '\n' | grep -v '^$' | wc -l | tr -d ' ')
+elif [[ "$SCOPES_CLEAN" == *","* ]]; then
+    # Split by , and count
+    COUNT=$(echo "$SCOPES_CLEAN" | tr ',' '\n' | grep -v '^$' | wc -l | tr -d ' ')
+else
+    COUNT=1
+fi
+
+# Validate max 3 scopes
+if [ "$COUNT" -gt 3 ]; then
+    print_error
+    echo -e "${RED}Error: Too many scopes ($COUNT). Maximum is 3.${NC}"
+    echo ""
+    echo -e "${YELLOW}Your scopes:${NC} $SCOPES"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Valid types (lowercase only)
+VALID_TYPES="feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert"
+
+# Validate type is not empty after removing '!'
+if [ -z "$TYPE" ]; then
+    print_error
+    echo -e "${RED}Error: Type cannot be empty${NC}"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Validate type is lowercase letters only
+if [[ ! "$TYPE" =~ ^[a-z]+$ ]]; then
+    print_error
+    echo -e "${RED}Error: Type must be lowercase letters only${NC}"
+    echo ""
+    echo -e "${YELLOW}Your type:${NC} $TYPE"
+    echo -e "${YELLOW}Valid types:${NC} $VALID_TYPES"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Validate type is in the allowed list
+if [[ ! "$TYPE" =~ ^($VALID_TYPES)$ ]]; then
+    print_error
+    echo -e "${RED}Error: Invalid type '${TYPE}'${NC}"
+    echo ""
+    echo -e "${YELLOW}Valid types:${NC} $VALID_TYPES"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Validate scope characters (only lowercase, numbers, &, ,)
+# Allow empty scopes? No, scopes must have content
+if [[ ! "$SCOPES_CLEAN" =~ ^[a-z0-9]+([&,][a-z0-9]+)*$ ]]; then
+    print_error
+    echo -e "${RED}Error: Scopes must contain only lowercase letters, numbers, &, and ,${NC}"
+    echo ""
+    echo -e "${YELLOW}Your scopes:${NC} $SCOPES"
+    echo -e "${YELLOW}Each scope must start with a letter or number and contain only lowercase letters and numbers${NC}"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Validate subject (should not be empty)
+if [[ "$SUBJECT" =~ ^[[:space:]]*$ ]]; then
+    print_error
+    echo -e "${RED}Error: Subject cannot be empty${NC}"
+    echo ""
+    echo -e "${YELLOW}Your commit:${NC} $COMMIT_MSG"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Validate subject starts with a letter or number (relaxed from original)
+if [[ ! "$SUBJECT" =~ ^[a-zA-Z0-9] ]]; then
+    print_error
+    echo -e "${RED}Error: Subject should start with a letter or number${NC}"
+    echo ""
+    echo -e "${YELLOW}Your subject:${NC} $SUBJECT"
+    echo ""
+    print_format_help
+    exit 1
+fi
+
+# Validate subject is not too long (optional, 100 characters max)
+SUBJECT_LENGTH=${#SUBJECT}
+if [ "$SUBJECT_LENGTH" -gt 100 ]; then
+    echo -e "${YELLOW}⚠️  Warning: Subject is long ($SUBJECT_LENGTH characters)${NC}"
+    echo -e "${YELLOW}   Consider keeping it under 100 characters${NC}"
+fi
+
+# Validate subject doesn't start with a lowercase letter (encourage proper case)
+if [[ "$SUBJECT" =~ ^[a-z] ]]; then
+    echo -e "${YELLOW}💡 Tip: Consider starting subject with a capital letter${NC}"
+fi
+
+# All validations passed
+print_success
+echo -e "${GREEN}Commit summary:${NC}"
+echo -e "  ${BLUE}Type:${NC} $TYPE"
+echo -e "  ${BLUE}Breaking:${NC} $BREAKING"
+echo -e "  ${BLUE}Scopes:${NC} $SCOPES ($COUNT scope(s))"
+echo -e "  ${BLUE}Subject:${NC} $SUBJECT"
+if [ "$SUBJECT_LENGTH" -gt 100 ]; then
+    echo -e "  ${YELLOW}Length:${NC} $SUBJECT_LENGTH characters (consider shortening)"
+fi
+echo ""
+echo -e "${GREEN}✅ Commit accepted!${NC}"
+
+exit 0
