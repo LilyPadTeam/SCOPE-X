@@ -1,0 +1,322 @@
+name: Auto Release Bumper
+
+on:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  bump:
+    name: Bump Version and Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Get commit messages since last tag
+        id: commits
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            COMMITS=$(git log --format=%s HEAD 2>/dev/null || echo "")
+          else
+            COMMITS=$(git log --format=%s $LAST_TAG..HEAD 2>/dev/null || echo "")
+          fi
+          
+          if [ -z "$COMMITS" ]; then
+            echo "No commits found"
+            echo "commits=No commits found" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "commits<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+      - name: Determine version bump
+        id: bump
+        run: |
+          COMMITS="${{ steps.commits.outputs.commits }}"
+          
+          if [ "$COMMITS" = "No commits found" ]; then
+            echo "bump=none" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          MAJOR=0
+          MINOR=0
+          PATCH=0
+          
+          # Read commits without using pipe to avoid subshell
+          echo "$COMMITS" | while IFS= read -r commit; do
+            if [ -z "$commit" ]; then
+              continue
+            fi
+            
+            # Check for breaking changes (major)
+            if [[ $commit =~ ^[a-z]+!\( ]]; then
+              MAJOR=1
+              echo "Breaking change detected: major bump"
+            fi
+            
+            # Check for features (minor)
+            if [[ $commit =~ ^feat\( ]]; then
+              # Extract the first scope before & or ,
+              SCOPE=$(echo "$commit" | sed -n 's/^feat(\([^,&]*\).*$/\1/p')
+              
+              # Check if it's a primary scope feature (only one scope)
+              if [[ $commit =~ ^feat\([^&,]+\): ]]; then
+                MINOR=1
+                echo "Feature in primary scope (single): minor bump"
+              # Check if feature has multiple scopes
+              elif [[ $commit =~ ^feat\([^)]+[&,][^)]+\): ]]; then
+                # Feature with multiple scopes is still a minor bump
+                MINOR=1
+                echo "Feature with multiple scopes: minor bump"
+              else
+                PATCH=1
+                echo "Feature in secondary scope: patch bump"
+              fi
+              continue
+            fi
+            
+            # Everything else is patch
+            if [[ $commit =~ ^(fix|docs|style|refactor|perf|test|chore|ci|build)\( ]]; then
+              PATCH=1
+              echo "Non-feature commit: patch bump"
+            fi
+          done
+          
+          # Read the variables back - they were set in subshell
+          # We need to use a different approach to persist values
+          
+          # Re-evaluate commits to set bump type
+          BUMP="none"
+          while IFS= read -r commit; do
+            if [ -z "$commit" ]; then
+              continue
+            fi
+            
+            if [[ $commit =~ ^[a-z]+!\( ]]; then
+              BUMP="major"
+              break
+            fi
+            
+            if [[ $commit =~ ^feat\( ]]; then
+              BUMP="minor"
+              # Continue checking for breaking changes
+              continue
+            fi
+            
+            if [[ $commit =~ ^(fix|docs|style|refactor|perf|test|chore|ci|build)\( ]]; then
+              if [ "$BUMP" != "major" ] && [ "$BUMP" != "minor" ]; then
+                BUMP="patch"
+              fi
+            fi
+          done <<< "$COMMITS"
+          
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
+          echo "Version bump determined: $BUMP"
+          
+      - name: Get current version
+        id: current_version
+        run: |
+          if [ -f "package.json" ]; then
+            VERSION=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.0.0")
+          elif [ -f "Cargo.toml" ]; then
+            VERSION=$(grep '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/' | head -n1 || echo "0.0.0")
+          elif [ -f "pyproject.toml" ]; then
+            VERSION=$(grep '^version' pyproject.toml | sed 's/version = "\(.*\)"/\1/' | head -n1 || echo "0.0.0")
+          else
+            # Check if there's a VERSION file
+            if [ -f "VERSION" ]; then
+              VERSION=$(cat VERSION | tr -d '\n')
+            else
+              VERSION="0.0.0"
+            fi
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+      - name: Calculate new version
+        id: new_version
+        if: steps.bump.outputs.bump != 'none'
+        run: |
+          VERSION="${{ steps.current_version.outputs.version }}"
+          
+          # Ensure version format
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Warning: Invalid version format '$VERSION', defaulting to 0.0.0"
+            VERSION="0.0.0"
+          fi
+          
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          
+          BUMP="${{ steps.bump.outputs.bump }}"
+          case $BUMP in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+            *)
+              echo "No bump needed"
+              exit 0
+              ;;
+          esac
+          
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION -> $NEW_VERSION"
+          
+      - name: Update version files
+        if: steps.bump.outputs.bump != 'none' && steps.new_version.outputs.new_version != ''
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          
+          # Update package.json if exists
+          if [ -f "package.json" ]; then
+            npm version $NEW_VERSION --no-git-tag-version --allow-same-version
+          fi
+          
+          # Update Cargo.toml if exists
+          if [ -f "Cargo.toml" ]; then
+            sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
+          fi
+          
+          # Update pyproject.toml if exists
+          if [ -f "pyproject.toml" ]; then
+            sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" pyproject.toml
+          fi
+          
+          # Update VERSION file if exists
+          if [ -f "VERSION" ]; then
+            echo "$NEW_VERSION" > VERSION
+          fi
+          
+          echo "Version updated to $NEW_VERSION"
+          
+      - name: Commit version bump
+        if: steps.bump.outputs.bump != 'none' && steps.new_version.outputs.new_version != ''
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Add all version files
+          git add package.json Cargo.toml pyproject.toml VERSION 2>/dev/null || true
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          git commit -m "chore(release): bump version to $NEW_VERSION"
+          git push
+          
+      - name: Create tag
+        if: steps.bump.outputs.bump != 'none' && steps.new_version.outputs.new_version != ''
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
+          git push origin "v$NEW_VERSION"
+          
+      - name: Generate release notes
+        if: steps.bump.outputs.bump != 'none' && steps.new_version.outputs.new_version != ''
+        id: release_notes
+        run: |
+          COMMITS="${{ steps.commits.outputs.commits }}"
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          CURRENT_VERSION="${{ steps.current_version.outputs.version }}"
+          
+          if [ "$COMMITS" = "No commits found" ]; then
+            echo "No commits for release notes"
+            echo "body=No commits found" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Initialize sections
+          FEATURES=""
+          FIXES=""
+          BREAKING_CHANGES=""
+          DOCS=""
+          OTHER=""
+          
+          # Process commits without subshell issues
+          while IFS= read -r commit; do
+            if [ -z "$commit" ]; then
+              continue
+            fi
+            
+            if [[ $commit =~ ^([a-z]+)!?\(([^)]+)\):\ (.+)$ ]]; then
+              TYPE="${BASH_REMATCH[1]}"
+              SCOPES="${BASH_REMATCH[2]}"
+              SUBJECT="${BASH_REMATCH[3]}"
+              
+              ENTRY="- ${TYPE}(${SCOPES}): ${SUBJECT}"
+              
+              case $TYPE in
+                feat)
+                  if [[ $commit =~ ^feat! ]]; then
+                    BREAKING_CHANGES="${BREAKING_CHANGES}${ENTRY}\n"
+                  else
+                    FEATURES="${FEATURES}${ENTRY}\n"
+                  fi
+                  ;;
+                fix)
+                  FIXES="${FIXES}${ENTRY}\n"
+                  ;;
+                docs)
+                  DOCS="${DOCS}${ENTRY}\n"
+                  ;;
+                *)
+                  OTHER="${OTHER}${ENTRY}\n"
+                  ;;
+              esac
+            fi
+          done <<< "$COMMITS"
+          
+          # Write release notes to file
+          cat > release_notes.md << EOF
+          ## Release v${NEW_VERSION}
+          
+          ### Version Bump: ${{ steps.bump.outputs.bump }}
+          
+          $(if [ -n "$BREAKING_CHANGES" ]; then echo "### 💥 Breaking Changes\n${BREAKING_CHANGES}"; fi)
+          $(if [ -n "$FEATURES" ]; then echo "### ✨ Features\n${FEATURES}"; fi)
+          $(if [ -n "$FIXES" ]; then echo "### 🐛 Bug Fixes\n${FIXES}"; fi)
+          $(if [ -n "$DOCS" ]; then echo "### 📚 Documentation\n${DOCS}"; fi)
+          $(if [ -n "$OTHER" ]; then echo "### 🔧 Other Changes\n${OTHER}"; fi)
+          
+          ---
+          
+          **Full Changelog**: https://github.com/${{ github.repository }}/compare/${CURRENT_VERSION:-v0.0.0}...v${NEW_VERSION}
+          EOF
+          
+          echo "body_path=release_notes.md" >> $GITHUB_OUTPUT
+          
+      - name: Create GitHub Release
+        if: steps.bump.outputs.bump != 'none' && steps.new_version.outputs.new_version != ''
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.new_version.outputs.new_version }}
+          name: Release v${{ steps.new_version.outputs.new_version }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
