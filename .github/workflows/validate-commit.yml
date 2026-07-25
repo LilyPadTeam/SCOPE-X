@@ -1,0 +1,64 @@
+name: Validate SCOPE-X Commits
+
+on:
+  push:
+    branches: [ main, develop, master ]
+  pull_request:
+    branches: [ main, develop, master ]
+
+jobs:
+  validate:
+    name: Validate Commit Messages
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Get all commit messages
+        id: commits
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            COMMITS=$(git log --format=%s origin/${{ github.base_ref }}..HEAD)
+          else
+            COMMITS=$(git log --format=%s HEAD~10..HEAD)
+          fi
+          echo "commits<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+      - name: Validate SCOPE-X format
+        run: |
+          VALID=true
+          echo "${{ steps.commits.outputs.commits }}" | while IFS= read -r commit; do
+            if [ -z "$commit" ]; then
+              continue
+            fi
+            
+            # Check if commit matches SCOPE-X format
+            # Format: type(!)(scope1 & scope2): subject OR type(!)(scope1, scope2): subject
+            if [[ ! $commit =~ ^[a-z]+(!?)\\(([a-z0-9]+([\&,][a-z0-9]+){0,2})\\):\ .+$ ]]; then
+              echo "ERROR: Invalid commit message: $commit"
+              echo ""
+              echo "Expected format:"
+              echo "  Single file: <type>(<scope1> & <scope2>): <subject>"
+              echo "  Multiple files: <type>(<scope1>, <scope2>): <subject>"
+              echo "  Breaking: <type>!(<scope>): <subject>"
+              echo "  Max 3 scopes allowed"
+              echo ""
+              echo "Examples:"
+              echo "  feat(auth & monitoring): add structured logging"
+              echo "  fix(auth, api): handle expired token"
+              echo "  feat!(core, ui): migrate to new state management"
+              VALID=false
+              exit 1
+            fi
+            
+            echo "Valid commit: $commit"
+          done
+          
+          if [ "$VALID" = "true" ]; then
+            echo "All commit messages are valid SCOPE-X format!"
+          fi
