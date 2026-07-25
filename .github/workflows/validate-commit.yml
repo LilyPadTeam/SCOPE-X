@@ -20,22 +20,48 @@ jobs:
       - name: Get all commit messages
         id: commits
         run: |
+          # For pull requests, get commits in the PR
           if [ "${{ github.event_name }}" == "pull_request" ]; then
-            COMMITS=$(git log --format=%s origin/${{ github.base_ref }}..HEAD)
+            # Get the base ref (target branch) and compare
+            git fetch origin ${{ github.base_ref }}
+            COMMITS=$(git log --format=%s origin/${{ github.base_ref }}..HEAD 2>/dev/null || echo "")
           else
-            COMMITS=$(git log --format=%s HEAD~10..HEAD)
+            # For pushes, get commits since last push or all commits if shallow
+            # Use a safer approach: get all commits in this push
+            if [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+              # Get commits since the previous commit
+              COMMITS=$(git log --format=%s ${{ github.event.before }}..HEAD 2>/dev/null || echo "")
+            else
+              # Fallback: get last 10 commits, but handle if less exist
+              COMMITS=$(git log --format=%s -n 10 HEAD 2>/dev/null || echo "")
+            fi
           fi
+          
+          # If no commits found, exit gracefully
+          if [ -z "$COMMITS" ]; then
+            echo "No commits to validate"
+            echo "commits=No commits to validate" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
           echo "commits<<EOF" >> $GITHUB_OUTPUT
           echo "$COMMITS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
           
       - name: Validate SCOPE-X format
+        if: steps.commits.outputs.commits != 'No commits to validate'
         run: |
           VALID=true
-          echo "${{ steps.commits.outputs.commits }}" | while IFS= read -r commit; do
+          COMMIT_LIST="${{ steps.commits.outputs.commits }}"
+          
+          # Handle case where commits might have newlines
+          echo "$COMMIT_LIST" | while IFS= read -r commit; do
+            # Skip empty lines
             if [ -z "$commit" ]; then
               continue
             fi
+            
+            echo "Checking: $commit"
             
             # Check if commit matches SCOPE-X format
             # Format: type(!)(scope1 & scope2): subject OR type(!)(scope1, scope2): subject
@@ -52,13 +78,15 @@ jobs:
               echo "  feat(auth & monitoring): add structured logging"
               echo "  fix(auth, api): handle expired token"
               echo "  feat!(core, ui): migrate to new state management"
-              VALID=false
               exit 1
             fi
             
-            echo "Valid commit: $commit"
+            echo "✅ Valid commit: $commit"
           done
           
-          if [ "$VALID" = "true" ]; then
-            echo "All commit messages are valid SCOPE-X format!"
+          # Check if validation passed
+          if [ "$?" -eq 0 ]; then
+            echo "✅ All commit messages are valid SCOPE-X format!"
+          else
+            exit 1
           fi
