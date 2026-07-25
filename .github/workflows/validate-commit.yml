@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 0
           
-      - name: Get all commit messages
+      - name: Get commit messages
         id: commits
         run: |
           # For pull requests, get commits in the PR
@@ -56,29 +56,72 @@ jobs:
             
             echo "Checking: $commit"
             
-            # Fixed regex pattern that properly handles:
-            # - Optional spaces around delimiters
-            # - All valid types (feat, fix, chore, docs, etc.)
-            # - Breaking changes with !
-            # - Max 3 scopes with & or , delimiters
-            if [[ ! $commit =~ ^[a-z]+(!?)\\([a-z0-9]+([[:space:]]*[&,][[:space:]]*[a-z0-9]+){0,2})\\):[[:space:]]+.+$ ]]; then
-              echo "ERROR: Invalid commit message: $commit"
+            # Validate with a simpler approach using multiple conditions
+            # Extract type, scope, and subject
+            if [[ "$commit" =~ ^([a-z]+)(!?)\(([^)]+)\):(.+)$ ]]; then
+              TYPE="${BASH_REMATCH[1]}"
+              BREAKING="${BASH_REMATCH[2]}"
+              SCOPES="${BASH_REMATCH[3]}"
+              SUBJECT="${BASH_REMATCH[4]}"
+              
+              # Clean up scopes (remove spaces)
+              SCOPES_CLEAN=$(echo "$SCOPES" | tr -d ' ')
+              
+              # Check if scopes are empty
+              if [ -z "$SCOPES_CLEAN" ]; then
+                echo "ERROR: Empty scope"
+                exit 1
+              fi
+              
+              # Check subject
+              if [ -z "$SUBJECT" ] || [[ "$SUBJECT" =~ ^[[:space:]]+$ ]]; then
+                echo "ERROR: Empty subject"
+                exit 1
+              fi
+              
+              # Count scopes
+              if [[ "$SCOPES_CLEAN" == *"&"* ]]; then
+                DELIMITER="&"
+                COUNT=$(echo "$SCOPES_CLEAN" | awk -F'&' '{print NF}')
+              elif [[ "$SCOPES_CLEAN" == *","* ]]; then
+                DELIMITER=","
+                COUNT=$(echo "$SCOPES_CLEAN" | awk -F',' '{print NF}')
+              else
+                DELIMITER="none"
+                COUNT=1
+              fi
+              
+              # Validate max 3 scopes
+              if [ "$COUNT" -gt 3 ]; then
+                echo "ERROR: Too many scopes ($COUNT). Maximum is 3."
+                echo "Commit: $commit"
+                exit 1
+              fi
+              
+              echo "✅ Valid commit: $commit"
+              echo "   Type: $TYPE"
+              echo "   Breaking: ${BREAKING:-No}"
+              echo "   Scopes: $SCOPES ($COUNT scope(s))"
+              echo "   Subject: $SUBJECT"
+              echo "---"
+              
+            else
+              echo "ERROR: Invalid commit message format: $commit"
               echo ""
               echo "Expected format:"
-              echo "  Single file: <type>(<scope1> & <scope2>): <subject>"
-              echo "  Multiple files: <type>(<scope1>, <scope2>): <subject>"
-              echo "  Breaking: <type>!(<scope>): <subject>"
-              echo "  Max 3 scopes allowed"
+              echo "  <type>(<scope1> & <scope2>): <subject>  (same file)"
+              echo "  <type>(<scope1>, <scope2>): <subject>  (different files)"
+              echo "  <type>!(<scope>): <subject>  (breaking change)"
               echo ""
               echo "Examples:"
               echo "  feat(auth & monitoring): add structured logging"
-              echo "  fix(auth, api): handle expired token"
+              echo "  fix(auth, api): handle expired token gracefully"
               echo "  feat!(core, ui): migrate to new state management"
               echo "  chore(fix & ci): fix errors"
+              echo ""
+              echo "Your commit: $commit"
               exit 1
             fi
-            
-            echo "✅ Valid commit: $commit"
           done
           
           if [ "$?" -eq 0 ]; then
