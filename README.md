@@ -913,20 +913,6 @@ cd SCOPE-X
 5. Submit a pull request
 6. Wait for review
 
-### Code of Conduct
-
-We are committed to fostering a welcoming community. Please read our [Code of Conduct](CODE_OF_CONDUCT.md).
-
----
-
-
-
-
-### Testimonials
-
-> "SCOPE-X solved our team's biggest pain point. We no longer have to lie about which modules our commits affect." - **Developer from Company X**
-
-> "The `&` vs `,` distinction is genius. It immediately tells me if I need to do a deep integration review or a cross-module review." - **Maintainer of Project Y**
 
 ---
 
