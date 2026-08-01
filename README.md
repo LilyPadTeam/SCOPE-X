@@ -933,10 +933,6 @@ cd SCOPE-X
 
 ---
 
-## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=yourusername/scope-x-convention&type=Date)](https://star-history.com/#yourusername/scope-x-convention&Date)
-
----
 
 **Star this repo if you believe in honest commit messages!**
